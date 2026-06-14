@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { collection, getDocs } from "firebase/firestore";
+import { collection, getDocs, addDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "./firebase";
 import { analyzeTimetableImage } from './OcrService';
 
@@ -97,19 +97,27 @@ export default function MealPlannerApp() {
   const [dbBuildings, setDbBuildings] = useState({});
   const [dbRestaurants, setDbRestaurants] = useState([]);
   const [parsedTimetable, setParsedTimetable] = useState([]);
-  
+
   const [remainingTime, setRemainingTime] = useState(0);
   const [currentBuilding, setCurrentBuilding] = useState('810관');
   const [nextBuilding, setNextBuilding] = useState('801관');
   const [targetClass, setTargetClass] = useState(null);
-
+  const [selectedRestaurant, setSelectedRestaurant] = useState(null);
   // 파이어베이스 데이터 로드
+  // 파이어베이스 데이터 로드 부분 찾아서 수정 👇
   useEffect(() => {
     const fetchRealData = async () => {
       try {
         const bSnap = await getDocs(collection(db, "buildings"));
         const tempBuildings = {};
-        bSnap.forEach(doc => { tempBuildings[doc.id] = doc.data().walkingTimes || {}; });
+        bSnap.forEach(doc => {
+          const data = doc.data();
+          // 💡기존 도보 시간 목록을 펼치고, geopoint 필드를 슬쩍 같이 추가합니다.
+          tempBuildings[doc.id] = {
+            ...data.walkingTimes,
+            geopoint: data.geopoint
+          };
+        });
         setDbBuildings(tempBuildings);
 
         const rSnap = await getDocs(collection(db, "restaurants"));
@@ -122,6 +130,60 @@ export default function MealPlannerApp() {
     };
     fetchRealData();
   }, []);
+
+  useEffect(() => {
+    if (currentScreen === 'ROUTE') {
+      setShowFeedback(false);
+
+      // 1. 카카오맵 렌더링
+      if (window.kakao && window.kakao.maps) {
+        window.kakao.maps.load(() => {
+          const container = document.getElementById('kakao-map');
+
+          // ⚠️ 아직 DB에 식당 좌표가 없으므로 임시 좌표(예: 중앙대 서울캠퍼스 인근)를 사용합니다.
+          // 향후 Firebase DB 식당 정보에 lat(위도), lng(경도) 필드를 추가하면 이걸로 대체할 수 있습니다.
+          const options = {
+            center: new window.kakao.maps.LatLng(37.5050, 126.9571),
+            level: 3 // 지도의 확대 레벨
+          };
+
+          const map = new window.kakao.maps.Map(container, options);
+
+          // 지도 중심에 핀(마커) 꽂기
+          const marker = new window.kakao.maps.Marker({
+            position: options.center
+          });
+          marker.setMap(map);
+        });
+      }
+
+      // 2. 3초(3000ms) 뒤 피드백 팝업 띄우기
+      const timer = setTimeout(() => {
+        setShowFeedback(true);
+      }, 3000);
+
+      return () => clearTimeout(timer);
+    }
+  }, [currentScreen]);
+
+  // 💡 [신규 추가] 피드백 DB 전송 함수
+  const handleFeedbackSubmit = async (feedbackTitle) => {
+    try {
+      await addDoc(collection(db, "reviews"), {
+        feedback: feedbackTitle,
+        gapTime: remainingTime,
+        departure: currentBuilding,
+        destination: nextBuilding,
+        createdAt: serverTimestamp()
+      });
+      setShowFeedback(false);
+      setShowPromotion(true);
+    } catch (error) {
+      console.error("리뷰 DB 저장 중 에러 발생:", error);
+      setShowFeedback(false);
+      setShowPromotion(true);
+    }
+  };
 
   const navigate = (screen) => {
     setPreviousScreen(currentScreen);
@@ -149,6 +211,7 @@ export default function MealPlannerApp() {
       .map(r => ({
         id: r.id,
         name: r.name,
+        geopoint: r.geopoint,
         location: r.building || r.location || '알 수 없음',
         travelTime: getWalkingTime(currentBuilding, r.building || r.location),
         prepTime: r.cookTime || 5,
@@ -239,9 +302,8 @@ export default function MealPlannerApp() {
 
             <div className="space-y-3 relative">
               <button
-                className={`w-full py-4 rounded-xl font-bold text-sm transition-all duration-200 shadow-md ${
-                  isLoading ? 'bg-[#EAE5DF] text-[#A69E96]' : 'bg-[#FF7A00] hover:bg-[#E66E00] text-white'
-                }`}
+                className={`w-full py-4 rounded-xl font-bold text-sm transition-all duration-200 shadow-md ${isLoading ? 'bg-[#EAE5DF] text-[#A69E96]' : 'bg-[#FF7A00] hover:bg-[#E66E00] text-white'
+                  }`}
                 disabled={isLoading}
               >
                 {isLoading ? (
@@ -273,25 +335,121 @@ export default function MealPlannerApp() {
       setParsedTimetable(prev => prev.map(item => item.id === id ? { ...item, [field]: value } : item));
     };
 
+    // renderTimetableEdit 내부의 handleConfirm 함수 찾아서 통째로 덮어쓰기 👇
+    // const handleConfirm = () => {
+    //   const now = new Date();
+    //   const currentDayStr = ['일', '월', '화', '수', '목', '금', '토'][now.getDay()];
+    //   const nowH = now.getHours();
+    //   const nowM = now.getMinutes();
+
+    //   const todayClasses = parsedTimetable.filter(c => c.day === currentDayStr);
+
+    //   // 시간 순서대로 정렬
+    //   todayClasses.sort((a, b) => {
+    //     const [aH, aM] = a.startTime.split(':').map(Number);
+    //     const [bH, bM] = b.startTime.split(':').map(Number);
+    //     return (aH * 60 + aM) - (bH * 60 + bM);
+    //   });
+
+    //   // 1. 다음 수업 찾기 (현재 시간 이후 시작)
+    //   const nextClass = todayClasses.find(c => {
+    //     if (!c.startTime) return false;
+    //     const [h, m] = c.startTime.split(':').map(Number);
+    //     return (h > nowH) || (h === nowH && m > nowM);
+    //   });
+
+    //   // 2. 💡 [신규] 직전 수업 찾기 (현재 시간 이전에 끝난 수업 목록 중 맨 마지막 것)
+    //   const priorClasses = todayClasses.filter(c => {
+    //     if (!c.endTime) return false;
+    //     const [h, m] = c.endTime.split(':').map(Number);
+    //     return (h < nowH) || (h === nowH && m <= nowM);
+    //   });
+    //   const lastClass = priorClasses[priorClasses.length - 1]; // 가장 직전에 끝난 수업
+
+    //   if (nextClass) {
+    //     setTargetClass({ 
+    //       name: nextClass.subject, 
+    //       hour: parseInt(nextClass.startTime.split(':')[0]), 
+    //       minute: parseInt(nextClass.startTime.split(':')[1]) 
+    //     });
+
+    //     // 💡 가짜 고정값 대신 직전 수업 건물을 넣고, 오늘 첫 수업이라 직전 수업이 없으면 기본값을 줍니다.
+    //     setCurrentBuilding(lastClass?.building || "810관");
+    //     setNextBuilding(nextClass.building || "801관");
+
+    //     const [nH, nM] = nextClass.startTime.split(':').map(Number);
+    //     setRemainingTime((nH * 60 + nM) - (nowH * 60 + nowM));
+    //   } else {
+    //     alert("오늘 남은 수업이 없습니다! 편안하게 식사하세요.");
+    //     setTargetClass(null);
+    //     setRemainingTime(120);
+    //   }
+
+    //   navigate('HOME');
+    // };
+
     const handleConfirm = () => {
-      // 목요일 13:00 시나리오 가설 계산
-      const nowH = 13, nowM = 0;
-      const nextClass = parsedTimetable.find(c => {
-        if (c.day !== '목' || !c.startTime) return false;
+      // 💡 [테스트용 조작] 실제 시간 대신 특정 요일과 시간을 강제로 고정합니다.
+      // (나중에 실제 배포할 때는 이 부분을 지우고 아래 주석 친 원래 코드를 쓰세요)
+      const currentDayStr = '목'; // 본인 에브리타임 시간표에 수업이 있는 요일로 변경하세요 (예: 월, 화)
+      const nowH = 13; // 테스트할 현재 시간
+      const nowM = 0;  // 테스트할 현재 분
+
+      /* // [원래 써야 할 진짜 시간 로직]
+      const now = new Date();
+      const currentDayStr = ['일', '월', '화', '수', '목', '금', '토'][now.getDay()];
+      const nowH = now.getHours();
+      const nowM = now.getMinutes();
+      */
+
+      const todayClasses = parsedTimetable.filter(c => c.day === currentDayStr);
+
+      // 시간 순서대로 정렬
+      todayClasses.sort((a, b) => {
+        const [aH, aM] = a.startTime.split(':').map(Number);
+        const [bH, bM] = b.startTime.split(':').map(Number);
+        return (aH * 60 + aM) - (bH * 60 + bM);
+      });
+
+      // 1. 다음 수업 찾기 (현재 시간 이후 시작)
+      const nextClass = todayClasses.find(c => {
+        if (!c.startTime) return false;
         const [h, m] = c.startTime.split(':').map(Number);
         return (h > nowH) || (h === nowH && m > nowM);
       });
 
+      // 2. 직전 수업 찾기 (현재 시간 이전에 끝난 수업 목록 중 맨 마지막 것)
+      const priorClasses = todayClasses.filter(c => {
+        if (!c.endTime) return false;
+        const [h, m] = c.endTime.split(':').map(Number);
+        return (h < nowH) || (h === nowH && m <= nowM);
+      });
+      const lastClass = priorClasses[priorClasses.length - 1];
+
       if (nextClass) {
-        setTargetClass({ name: nextClass.subject, hour: parseInt(nextClass.startTime.split(':')[0]), minute: parseInt(nextClass.startTime.split(':')[1]) });
-        setCurrentBuilding("810관");
+        setTargetClass({
+          name: nextClass.subject,
+          hour: parseInt(nextClass.startTime.split(':')[0]),
+          minute: parseInt(nextClass.startTime.split(':')[1])
+        });
+
+        // 직전 수업 건물을 넣고, 오늘 첫 수업이라 직전 수업이 없으면 기본값 '810관'을 줍니다.
+        setCurrentBuilding(lastClass?.building || "810관");
         setNextBuilding(nextClass.building || "801관");
+
         const [nH, nM] = nextClass.startTime.split(':').map(Number);
         setRemainingTime((nH * 60 + nM) - (nowH * 60 + nowM));
       } else {
-        setTargetClass({ name: '모바일 컴퓨팅', hour: 14, minute: 30 });
-        setRemainingTime(45);
+        // 🚨 오늘 남은 수업이 없을 때의 예외 처리 (여기가 비어있어서 지도가 깨졌던 것!)
+        alert("오늘 남은 수업이 없습니다! 편안하게 식사하세요.");
+        setTargetClass(null);
+        setRemainingTime(120);
+
+        // 💡 [핵심 방어코드] 수업이 없어도 현재 위치를 강제로 잡아줘서 길찾기 에러를 막습니다.
+        setCurrentBuilding(lastClass?.building || "810관");
+        setNextBuilding("801관"); // 임시 도착지
       }
+
       navigate('HOME');
     };
 
@@ -303,21 +461,21 @@ export default function MealPlannerApp() {
             <h2 className={PAGE_TITLE}>데이터 검수</h2>
             <p className={PAGE_SUBTITLE}>AI가 분석한 결과를 탭하여 수정할 수 있습니다.</p>
           </div>
-          
+
           <div className="flex-1 overflow-y-auto space-y-3 pb-4 scrollbar-thin">
             {parsedTimetable.map(item => (
               <div key={item.id} className="bg-white border border-[#F2ECE4] p-3.5 rounded-xl shadow-sm focus-within:border-[#FF7A00] transition-colors">
                 <div className="flex items-center gap-2 mb-2">
                   <span className="bg-[#FFF4EB] text-[#FF7A00] font-black px-2 py-1 rounded text-xs">{item.day}</span>
-                  <input type="text" value={item.subject} onChange={(e) => handleUpdate(item.id, 'subject', e.target.value)} 
-                         className="font-extrabold text-[#2E2216] text-sm w-full focus:outline-none bg-transparent" />
+                  <input type="text" value={item.subject} onChange={(e) => handleUpdate(item.id, 'subject', e.target.value)}
+                    className="font-extrabold text-[#2E2216] text-sm w-full focus:outline-none bg-transparent" />
                 </div>
                 <div className="flex items-center gap-2 text-xs">
                   <input type="time" value={item.startTime} onChange={(e) => handleUpdate(item.id, 'startTime', e.target.value)} className="bg-[#FAF8F5] border border-[#F2ECE4] rounded px-1 text-[#7A7570]" />
                   <span className="text-[#A69E96]">~</span>
                   <input type="time" value={item.endTime} onChange={(e) => handleUpdate(item.id, 'endTime', e.target.value)} className="bg-[#FAF8F5] border border-[#F2ECE4] rounded px-1 text-[#7A7570]" />
                   <input type="text" value={item.building} placeholder="건물 (예: 810관)" onChange={(e) => handleUpdate(item.id, 'building', e.target.value)}
-                         className={`border rounded px-2 w-full ml-1 ${!item.building ? 'border-red-300 bg-red-50' : 'bg-[#FAF8F5] border-[#F2ECE4] text-[#7A7570]'}`} />
+                    className={`border rounded px-2 w-full ml-1 ${!item.building ? 'border-red-300 bg-red-50' : 'bg-[#FAF8F5] border-[#F2ECE4] text-[#7A7570]'}`} />
                 </div>
               </div>
             ))}
@@ -423,7 +581,7 @@ export default function MealPlannerApp() {
               <h2 className={PAGE_TITLE}>빠르게 먹기 추천</h2>
               <p className="mt-2 text-[12px] text-[#FF7A00] font-bold">공강 시간 {remainingTime}분 · Plan B</p>
             </div>
-            
+
             <div className="flex gap-1.5 overflow-x-auto pb-2 mb-3 shrink-0 scrollbar-none">
               {['전체', '학내', '내리 상권'].map(tab => (
                 <button key={tab} onClick={() => setPlanBFilter(tab)} className={`px-3 py-1 rounded-full text-[10px] font-bold transition-all whitespace-nowrap ${planBFilter === tab ? 'bg-[#FF7A00] text-white' : 'bg-white border border-[#F2ECE4] text-[#7A7570]'}`}>{tab}</button>
@@ -471,7 +629,7 @@ export default function MealPlannerApp() {
               <h2 className={PAGE_TITLE}>여유로운 식사 추천</h2>
               <p className="mt-2 text-[12px] text-[#FF7A00] font-bold">공강 시간 {remainingTime}분 · Plan A</p>
             </div>
-            
+
             <div className="flex gap-1.5 overflow-x-auto pb-2 mb-3 shrink-0 scrollbar-none">
               {['전체', '학내', '내리 상권', '한경대'].map(tab => (
                 <button key={tab} onClick={() => setRestaurantFilter(tab)} className={`px-3 py-1 rounded-full text-[10px] font-bold transition-all whitespace-nowrap ${restaurantFilter === tab ? 'bg-[#FF7A00] text-white shadow-sm' : 'bg-white border border-[#F2ECE4] text-[#7A7570]'}`}>{tab}</button>
@@ -480,7 +638,7 @@ export default function MealPlannerApp() {
 
             <div className="overflow-y-auto flex-grow space-y-2.5 pr-1 pb-2 scrollbar-thin">
               {filtered.length > 0 ? filtered.map(res => (
-                <div key={res.id} className="bg-white border border-[#F2ECE4] p-4 rounded-[20px] shadow-sm hover:border-[#FF7A00] cursor-pointer space-y-2" onClick={() => navigate('DECIDE_MATE')}>
+                <div key={res.id} className="bg-white border border-[#F2ECE4] p-4 rounded-[20px] shadow-sm hover:border-[#FF7A00] cursor-pointer space-y-2" onClick={() => { setSelectedRestaurant(res); navigate('DECIDE_MATE'); }}>
                   <div className="flex justify-between items-start gap-2">
                     <div className="flex gap-2.5">
                       <div className="w-9 h-9 rounded-lg bg-[#FAF8F5] border border-[#F2ECE4] flex items-center justify-center text-lg">{getFoodEmoji(res.menu)}</div>
@@ -500,21 +658,177 @@ export default function MealPlannerApp() {
   };
 
   // 나머지 정적 화면들은 변경 없이 그대로 호출
-  const renderDecideMate = () => ( /* 동료 코드와 100% 동일 */
+  const renderDecideMate = () => (
     <div className="h-full flex flex-col bg-[#FAF8F5] animate-fade-in"><BrandHeader showBack={true} onBack={() => navigate('RESTAURANT_LIST')} /><div className="flex-grow pt-[22px] px-6 pb-6 flex flex-col justify-between"><div className="my-auto space-y-6"><div className="text-left mb-6"><h2 className={PAGE_TITLE}>식사 방식 선택</h2><p className={PAGE_SUBTITLE}>오늘의 한 끼, 어떻게 먹을까요?</p></div><div className="space-y-3.5"><button className="w-full bg-white border border-[#F2ECE4] hover:border-[#FF7A00] p-5 rounded-[20px] flex items-center gap-3.5 text-left transition-all hover:shadow-md active:scale-[0.99] group shadow-sm" onClick={() => navigate('PAYMENT')}><div className="w-10 h-10 rounded-lg bg-[#FAF8F5] border border-[#F2ECE4] group-hover:bg-[#FFF4EB] group-hover:border-[#FF7A00]/20 flex items-center justify-center text-xl shrink-0 transition-colors">👤</div><div className="space-y-0.5"><p className="font-extrabold text-sm text-[#2E2216] group-hover:text-[#FF7A00] transition-colors">혼자 먹기</p><p className="text-[10px] text-[#7A7570] font-medium">바로 주문하고 편하게 식사</p></div></button><button className="w-full bg-gradient-to-br from-[#FF9533] to-[#FF7A00] p-5 rounded-[20px] flex items-center gap-3.5 text-left shadow-lg hover:shadow-xl active:scale-[0.99] text-white relative overflow-hidden group" onClick={() => navigate('BITE_MATE')}><div className="absolute -right-6 -bottom-6 w-20 h-20 bg-white/10 rounded-full group-hover:scale-110 transition-transform" /><div className="w-10 h-10 rounded-lg bg-white/20 backdrop-blur-md flex items-center justify-center text-xl shrink-0">🤝</div><div className="space-y-0.5 z-10"><div className="flex items-center gap-1.5 flex-wrap"><p className="font-extrabold text-sm">밥친구 찾기</p><span className="bg-white text-[#FF7A00] text-[8px] px-1 py-0.5 rounded font-black leading-none">Bite-Mate</span></div><p className="text-[10px] opacity-90 font-medium">비슷한 공강 시간을 가진 학우와 함께</p></div></button></div></div><button className="text-[#7A7570] hover:text-[#FF7A00] text-xs font-bold underline py-2 mt-4 shrink-0 block text-center" onClick={() => navigate('RESTAURANT_LIST')}>식당 다시 고르기</button></div></div>
   );
-  
+
   const renderBiteMate = () => (
     <div className="h-full flex flex-col bg-[#FAF8F5] animate-fade-in"><BrandHeader showBack={true} onBack={() => navigate('DECIDE_MATE')} /><div className="flex-grow pt-[22px] px-6 pb-6 flex flex-col justify-between text-center"><div /><div className="space-y-6 my-auto"><div className="space-y-2"><h2 className={PAGE_TITLE}>밥친구 매칭 중...</h2><p className="text-[9px] text-[#FF7A00] font-extrabold uppercase tracking-wider bg-[#FFF4EB] px-3 py-0.5 rounded-full inline-block">Bite-Mate Matching</p></div><div className="relative w-24 h-24 mx-auto flex items-center justify-center"><div className="absolute inset-0 rounded-full bg-[#FF7A00]/5 animate-ping duration-1000" /><div className="absolute inset-2 rounded-full bg-[#FF7A00]/10 animate-pulse" /><div className="absolute inset-4 rounded-full border-4 border-[#FFF4EB] border-t-[#FF7A00] animate-spin" /><div className="absolute inset-6 bg-white rounded-full shadow-md flex items-center justify-center text-2xl">🎯</div></div><div className="space-y-1"><p className="text-[#2E2216] font-extrabold text-sm leading-relaxed">같은 공강 시간을 가진 학우를</p><p className="text-[#7A7570] font-medium text-[10px] leading-relaxed max-w-[240px] mx-auto">열심히 탐색하고 있습니다.</p></div></div><button className="w-full bg-[#FF7A00] hover:bg-[#E66E00] text-white py-2.5 px-4 font-bold text-xs rounded-full shadow-lg active:scale-[0.98] transition-all flex items-center justify-center shrink-0" onClick={() => navigate('PAYMENT')}>매칭 성공 (데모)</button></div></div>
   );
 
   const renderPayment = () => (
-    <div className="h-full flex flex-col bg-[#FAF8F5] animate-fade-in"><div className="flex-grow pt-[22px] px-6 pb-6 flex flex-col justify-between text-center"><div /><div className="space-y-7 my-auto"><div className="w-24 h-24 bg-[#FFF4EB] rounded-full mx-auto flex items-center justify-center text-5xl shadow-sm relative animate-bounce">🍳<span className="absolute -right-1 -bottom-1 w-7 h-7 bg-[#FF7A00] rounded-full flex items-center justify-center text-white border-2 border-white text-sm font-bold">✓</span></div><div className="space-y-2.5"><h2 className="text-[28px] font-black text-[#2E2216] leading-tight">주문 접수 완료</h2><p className="text-[14px] text-[#7A7570] leading-relaxed max-w-[300px] mx-auto">식당에 스마트 오더가 전달되었습니다.<br />도착 시간에 맞춰 조리가 시작됩니다.</p></div><div className="bg-white border-2 border-[#FF7A00] p-5 rounded-2xl max-w-[250px] mx-auto shadow-sm space-y-1.5"><p className="text-[12px] text-[#FF7A00] font-extrabold tracking-wider">픽업/대기 번호</p><p className="text-[44px] font-black text-[#FF7A00] tracking-wider font-mono leading-none">105</p></div></div><div className="space-y-3 shrink-0"><button className="w-full bg-[#FF922E] hover:bg-[#FF7A00] text-white py-4 px-4 font-bold text-base rounded-full shadow-xl active:scale-[0.98] transition-all flex items-center justify-center" onClick={() => navigate('ROUTE')}>📍 실시간 경로 확인</button><button className="w-full bg-[#2E2216] hover:bg-black text-white py-3.5 px-4 font-bold text-base rounded-full shadow-lg active:scale-[0.98] transition-all flex items-center justify-center" onClick={() => { navigate('ONBOARDING'); }}>처음 화면으로 돌아가기</button></div></div></div>
+    <div className="h-full flex flex-col bg-[#FAF8F5] animate-fade-in">
+      <div className="flex-grow pt-[22px] px-6 pb-6 flex flex-col justify-between text-center">
+        <div />
+        <div className="space-y-7 my-auto">
+          <div className="w-24 h-24 bg-[#FFF4EB] rounded-full mx-auto flex items-center justify-center text-5xl shadow-sm relative animate-bounce">
+            🍳<span className="absolute -right-1 -bottom-1 w-7 h-7 bg-[#FF7A00] rounded-full flex items-center justify-center text-white border-2 border-white text-sm font-bold">✓</span>
+          </div>
+          <div className="space-y-2.5">
+            <h2 className="text-[28px] font-black text-[#2E2216] leading-tight">주문 접수 완료</h2>
+            <p className="text-[14px] text-[#7A7570] leading-relaxed max-w-[300px] mx-auto">
+              식당에 스마트 오더가 전달되었습니다.<br />도착 시간에 맞춰 조리가 시작됩니다.
+            </p>
+          </div>
+          <div className="bg-white border-2 border-[#FF7A00] p-5 rounded-2xl max-w-[250px] mx-auto shadow-sm space-y-1.5">
+            <p className="text-[12px] text-[#FF7A00] font-extrabold tracking-wider">픽업/대기 번호</p>
+            <p className="text-[44px] font-black text-[#FF7A00] tracking-wider font-mono leading-none">105</p>
+          </div>
+        </div>
+
+        <div className="space-y-3 shrink-0">
+          <button className="w-full bg-[#FF922E] hover:bg-[#FF7A00] text-white py-4 px-4 font-bold text-base rounded-full shadow-xl active:scale-[0.98] transition-all flex items-center justify-center" onClick={() => navigate('ROUTE')}>
+            📍 실시간 경로 확인
+          </button>
+
+          {/* 💡 [수정된 부분] 목적지를 HOME으로 바꾸고 텍스트 수정 */}
+          <button className="w-full bg-[#2E2216] hover:bg-black text-white py-3.5 px-4 font-bold text-base rounded-full shadow-lg active:scale-[0.98] transition-all flex items-center justify-center" onClick={() => { navigate('HOME'); }}>
+            홈 화면으로 돌아가기
+          </button>
+        </div>
+      </div>
+    </div>
   );
 
-  const renderRoute = () => (
-    <div className="h-full flex flex-col bg-[#FAF8F5] animate-fade-in relative"><BrandHeader showBack={true} onBack={() => navigate('PAYMENT')} /><div className="flex-grow px-6 pt-5 pb-6 flex flex-col"><div className="mb-4"><h2 className="text-[24px] font-black text-[#2E2216] leading-tight">실시간 경로 안내</h2><p className="mt-2 text-[13px] text-[#7A7570] leading-relaxed">현재 위치에서 식당까지 가장 빠른 경로를 안내합니다.</p></div><div className="bg-white border border-[#F2ECE4] rounded-2xl p-4 shadow-sm mb-4"><div className="flex justify-between items-center mb-3"><span className="text-[12px] font-bold text-[#7A7570]">출발</span><span className="text-[14px] font-black text-[#2E2216]">{currentBuilding}</span></div><div className="h-px bg-[#F2ECE4] my-3" /><div className="flex justify-between items-center"><span className="text-[12px] font-bold text-[#7A7570]">도착</span><span className="text-[14px] font-black text-[#FF7A00]">식당</span></div></div><div className="flex-grow bg-white border-2 border-[#FF7A00] rounded-3xl shadow-sm overflow-hidden relative mb-4"><div className="absolute inset-0 bg-[#FFF4EB] flex items-center justify-center"><div className="text-center"><p className="text-4xl mb-3">🗺️</p><p className="text-[14px] font-black text-[#2E2216]">지도 API 영역</p><p className="text-[11px] text-[#7A7570] mt-1">추후 카카오맵 / 네이버맵 연동</p></div></div></div><div className="bg-white border border-[#F2ECE4] rounded-2xl p-4 shadow-sm mb-4"><div className="flex justify-between items-center"><span className="text-[13px] font-bold text-[#7A7570]">예상 이동시간</span><span className="text-[24px] font-black text-[#FF7A00]">{transitTime}분</span></div></div><button className="w-full bg-[#2E2216] hover:bg-black text-white py-3.5 px-4 font-bold text-base rounded-full shadow-lg active:scale-[0.98] transition-all" onClick={() => navigate('PAYMENT')}>주문 화면으로 돌아가기</button></div>{showFeedback && (<div className="absolute inset-0 bg-black/55 z-[100] flex items-center justify-center px-6"><div className="bg-white rounded-3xl p-6 w-full shadow-2xl text-center animate-fade-in relative"><button className="absolute top-4 right-4 text-gray-400 hover:text-[#FF7A00] text-xl font-light" onClick={() => setShowFeedback(false)}>×</button><div className="text-5xl mb-4">📝</div><h3 className="text-[21px] font-black text-[#2E2216] mb-2 leading-snug">식사는 시간 안에<br />가능했나요?</h3><p className="text-[11px] text-[#7A7570] mb-5">피드백은 다음 추천 정확도를 높이는 데 사용돼요.</p><div className="bg-[#FAF8F5] border border-[#F2ECE4] rounded-2xl p-4 mb-5 flex justify-between items-center"><div><p className="text-[10px] text-[#7A7570] font-bold">예상 소요 시간</p><p className="text-[20px] font-black text-[#2E2216]">{transitTime + 10}분</p></div><span className="text-[#A69E96] font-black">→</span><div><p className="text-[10px] text-[#7A7570] font-bold">실제 소요 시간</p><p className="text-[20px] font-black text-[#FF7A00]">{transitTime + 12}분</p></div></div><div className="grid grid-cols-3 gap-2">{[{ icon: '😊', title: '충분했어요' },{ icon: '😐', title: '딱 맞았어요' },{ icon: '😟', title: '부족했어요' },].map((item) => (<button key={item.title} className="border border-[#F2ECE4] rounded-2xl p-3 hover:border-[#FF7A00] hover:bg-[#FFF4EB] active:scale-[0.96] transition-all" onClick={() => { setShowFeedback(false); setShowPromotion(true); }}><p className="text-2xl mb-1">{item.icon}</p><p className="text-[11px] font-black text-[#2E2216]">{item.title}</p></button>))}</div></div></div>)}{showPromotion && (<div className="absolute inset-0 bg-black/55 z-[110] flex items-center justify-center px-6"><div className="bg-white rounded-3xl p-6 w-full shadow-2xl text-center relative animate-fade-in"><button className="absolute top-4 right-4 text-gray-400 hover:text-[#FF7A00] text-2xl font-light" onClick={() => setShowPromotion(false)}>×</button><div className="text-6xl mb-4">🎁</div><h3 className="text-[22px] font-black text-[#2E2216] mb-2">피드백 감사합니다!</h3><p className="text-[12px] text-[#7A7570] leading-relaxed mb-5">다음 공강에도 사용할 수 있는<br />특별 쿠폰이 지급되었습니다.</p><div className="bg-[#FFF4EB] border-2 border-dashed border-[#FF7A00] rounded-2xl p-5 mb-5"><p className="text-[10px] font-extrabold text-[#FF7A00] tracking-widest">GAPBITE COUPON</p><p className="text-[28px] font-black text-[#2E2216] mt-2 leading-tight">다음 주문<br />1,000원 할인!</p><p className="text-[11px] text-[#7A7570] mt-2">공강한입 제휴 식당 · 3일 이내 사용 가능</p></div><button className="w-full bg-[#FF7A00] hover:bg-[#FF922E] text-white py-3.5 rounded-full font-bold text-sm shadow-lg transition-all active:scale-[0.98]" onClick={() => { setShowPromotion(false); navigate('COUPON'); }}>쿠폰 확인</button></div></div>)}</div>
-  );
+  const renderRoute = () => {
+    const restaurantName = selectedRestaurant ? selectedRestaurant.name : '도착지';
+    
+    // 1. 도착지(식당) GeoPoint 좌표
+    const eLat = selectedRestaurant?.geopoint?.latitude || 37.5050;
+    const eLng = selectedRestaurant?.geopoint?.longitude || 126.9571;
+    
+    // 2. 출발지(현재 건물) GeoPoint 좌표
+    const startBuildingData = dbBuildings[currentBuilding];
+    const sLat = startBuildingData?.geopoint?.latitude || 37.5050;
+    const sLng = startBuildingData?.geopoint?.longitude || 126.9571;
+    
+    // 💡 [핵심] 기기 환경에 따른 URL 분기 처리
+    // PC 접속 시: 에러가 나지 않도록 목적지에 정확히 핀을 꽂아주는 공식 URL 사용
+    const pcWebUrl = `https://map.kakao.com/link/to/${restaurantName},${eLat},${eLng}`;
+    
+    // 스마트폰 접속 시: 출발지와 목적지 좌표를 완벽하게 연결해 카카오맵 앱을 실행하는 URL
+    const mobileAppUrl = `kakaomap://route?sp=${sLat},${sLng}&ep=${eLat},${eLng}&sn=${currentBuilding}&en=${restaurantName}`;
+
+    // 현재 기기가 모바일인지 확인
+    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    
+    // 기기에 맞는 최종 URL 결정
+    const finalMapUrl = isMobile ? mobileAppUrl : pcWebUrl;
+
+    return (
+      <div className="h-full flex flex-col bg-[#FAF8F5] animate-fade-in relative">
+        <BrandHeader showBack={true} onBack={() => navigate('PAYMENT')} />
+
+        <div className="flex-grow px-6 pt-5 pb-6 flex flex-col">
+          <div className="mb-4">
+            <h2 className="text-[24px] font-black text-[#2E2216] leading-tight">실시간 경로 안내</h2>
+            <p className="mt-2 text-[13px] text-[#7A7570] leading-relaxed">현재 위치에서 식당까지 가장 빠른 경로를 안내합니다.</p>
+          </div>
+
+          <div className="bg-white border border-[#F2ECE4] rounded-2xl p-4 shadow-sm mb-4">
+            <div className="flex justify-between items-center mb-3">
+              <span className="text-[12px] font-bold text-[#7A7570]">출발</span>
+              <span className="text-[14px] font-black text-[#2E2216]">{currentBuilding}</span>
+            </div>
+            <div className="h-px bg-[#F2ECE4] my-3" />
+            <div className="flex justify-between items-center">
+              <span className="text-[12px] font-bold text-[#7A7570]">도착</span>
+              <span className="text-[14px] font-black text-[#FF7A00]">{restaurantName}</span>
+            </div>
+          </div>
+
+          {/* 💡 [핵심] 실제 지도가 렌더링되는 영역 */}
+          <div className="flex-grow bg-white border-2 border-[#FF7A00] rounded-3xl shadow-sm overflow-hidden relative mb-4">
+            <div id="kakao-map" className="w-full h-full"></div>
+
+            {/* 카카오맵 앱으로 길찾기 띄우기 버튼 */}
+            <a
+              href={finalMapUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="absolute bottom-3 left-1/2 -translate-x-1/2 w-[220px] bg-[#2E2216] text-white px-4 py-2.5 rounded-full text-xs font-bold shadow-lg flex items-center justify-center gap-2 z-10 hover:bg-black transition-colors"
+            >
+              🚀 카카오맵으로 길찾기
+            </a>
+          </div>
+
+          <div className="bg-white border border-[#F2ECE4] rounded-2xl p-4 shadow-sm mb-4">
+            <div className="flex justify-between items-center">
+              <span className="text-[13px] font-bold text-[#7A7570]">예상 이동시간</span>
+              <span className="text-[24px] font-black text-[#FF7A00]">{transitTime}분</span>
+            </div>
+          </div>
+
+          <button className="w-full bg-[#EAE5DF] text-[#7A7570] py-3.5 px-4 font-bold text-base rounded-full shadow-sm active:scale-[0.98] transition-all" onClick={() => navigate('PAYMENT')}>
+            주문 화면으로 돌아가기
+          </button>
+        </div>
+
+        {/* --- 피드백 팝업 영역 --- */}
+        {showFeedback && (
+          <div className="absolute inset-0 bg-black/55 z-[100] flex items-center justify-center px-6">
+            <div className="bg-white rounded-3xl p-6 w-full shadow-2xl text-center animate-fade-in relative">
+              <button className="absolute top-4 right-4 text-gray-400 hover:text-[#FF7A00] text-xl font-light" onClick={() => setShowFeedback(false)}>×</button>
+              <div className="text-5xl mb-4">📝</div>
+              <h3 className="text-[21px] font-black text-[#2E2216] mb-2 leading-snug">식사는 시간 안에<br />가능했나요?</h3>
+              <p className="text-[11px] text-[#7A7570] mb-5">피드백은 다음 추천 정확도를 높이는 데 사용돼요.</p>
+
+              <div className="bg-[#FAF8F5] border border-[#F2ECE4] rounded-2xl p-4 mb-5 flex justify-between items-center">
+                <div><p className="text-[10px] text-[#7A7570] font-bold">예상 소요 시간</p><p className="text-[20px] font-black text-[#2E2216]">{transitTime + 10}분</p></div>
+                <span className="text-[#A69E96] font-black">→</span>
+                <div><p className="text-[10px] text-[#7A7570] font-bold">실제 소요 시간</p><p className="text-[20px] font-black text-[#FF7A00]">{transitTime + 12}분</p></div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { icon: '😊', title: '충분했어요' },
+                  { icon: '😐', title: '딱 맞았어요' },
+                  { icon: '😟', title: '부족했어요' },
+                ].map((item) => (
+                  <button key={item.title} className="border border-[#F2ECE4] rounded-2xl p-3 hover:border-[#FF7A00] hover:bg-[#FFF4EB] active:scale-[0.96] transition-all" onClick={() => handleFeedbackSubmit(item.title)}>
+                    <p className="text-2xl mb-1">{item.icon}</p>
+                    <p className="text-[11px] font-black text-[#2E2216]">{item.title}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* --- 프로모션(쿠폰) 팝업 영역 --- */}
+        {showPromotion && (
+          <div className="absolute inset-0 bg-black/55 z-[110] flex items-center justify-center px-6">
+            <div className="bg-white rounded-3xl p-6 w-full shadow-2xl text-center relative animate-fade-in">
+              <button className="absolute top-4 right-4 text-gray-400 hover:text-[#FF7A00] text-2xl font-light" onClick={() => setShowPromotion(false)}>×</button>
+              <div className="text-6xl mb-4">🎁</div>
+              <h3 className="text-[22px] font-black text-[#2E2216] mb-2">피드백 감사합니다!</h3>
+              <p className="text-[12px] text-[#7A7570] leading-relaxed mb-5">다음 공강에도 사용할 수 있는<br />특별 쿠폰이 지급되었습니다.</p>
+
+              <div className="bg-[#FFF4EB] border-2 border-dashed border-[#FF7A00] rounded-2xl p-5 mb-5">
+                <p className="text-[10px] font-extrabold text-[#FF7A00] tracking-widest">GAPBITE COUPON</p>
+                <p className="text-[28px] font-black text-[#2E2216] mt-2 leading-tight">다음 주문<br />1,000원 할인!</p>
+                <p className="text-[11px] text-[#7A7570] mt-2">공강한입 제휴 식당 · 3일 이내 사용 가능</p>
+              </div>
+
+              <button className="w-full bg-[#FF7A00] hover:bg-[#FF922E] text-white py-3.5 rounded-full font-bold text-sm shadow-lg transition-all active:scale-[0.98]" onClick={() => { setShowPromotion(false); navigate('COUPON'); }}>
+                쿠폰 확인
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const renderCoupon = () => (
     <div className="h-full flex flex-col bg-[#FAF8F5] animate-fade-in"><BrandHeader showBack={true} onBack={() => setCurrentScreen(previousScreen)} /><div className="flex-grow px-6 pt-6 pb-6 flex flex-col"><div className="mb-6 text-center"><h2 className="text-[30px] font-black text-[#2E2216] leading-tight">내 쿠폰함</h2><p className="mt-3 text-[13px] text-[#7A7570] leading-relaxed">보유한 쿠폰은 주문 시 자동으로 적용할 수 있어요!</p></div><div className="bg-white border border-[#F2ECE4] rounded-3xl p-5 shadow-sm flex-grow"><div className="flex items-center gap-2 mb-5"><span className="text-2xl">🎟️</span><p className="text-[18px] font-black text-[#2E2216]">보유 쿠폰 <span className="text-[#FF7A00]">1개</span></p></div><div className="bg-[#FFF4EB] border-2 border-dashed border-[#FF7A00] rounded-2xl px-4 py-4"><div className="flex items-center justify-between"><div><p className="text-[18px] font-black text-[#2E2216] leading-tight">피드백</p><p className="text-[18px] font-black text-[#2E2216] leading-tight">선물</p></div><div className="h-8 w-px bg-[#E5D6C7]" /><div className="text-center"><p className="text-[10px] text-[#7A7570] font-bold">할인금액</p><p className="text-[20px] font-black text-[#FF7A00]">1,000원</p></div><div className="h-8 w-px bg-[#E5D6C7]" /><div className="text-center"><p className="text-[10px] text-[#7A7570] font-bold">사용기한</p><p className="text-[20px] font-black text-[#2E2216]">6/31</p></div></div></div><div className="mt-5 bg-[#FAF8F5] border border-[#F2ECE4] rounded-2xl px-4 py-3 flex items-center gap-2"><span className="text-[#FF7A00] text-lg">ⓘ</span><p className="text-[11px] text-[#7A7570] font-medium">쿠폰은 주문 결제 단계에서 자동 적용됩니다.</p></div></div></div></div>
