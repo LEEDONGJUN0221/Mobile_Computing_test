@@ -3,14 +3,7 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
-  // 👇 여기부터 추가: 로컬 프록시 설정
-  server: {
-    proxy: {
-      '/everytime-api': {
-        target: 'https://everytime.kr',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/everytime-api/, '')
-      }
-    }
-  }
+  plugins: [react()],
+  // 본인이 만든 깃허브 레포지토리 이름을 슬래시(/) 사이에 적어주세요!
+  base: '/Mobile_Computing_test/'
 })
