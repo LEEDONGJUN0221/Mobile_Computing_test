@@ -4,7 +4,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 // 💡 .env 파일에 저장된 키를 안전하게 로드합니다. (깃허브 노출 방지)
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY; 
 const genAI = new GoogleGenerativeAI(API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
 const fileToGenerativePart = async (file) => {
   return new Promise((resolve) => {
